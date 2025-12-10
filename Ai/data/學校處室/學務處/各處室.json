@@ -1,0 +1,26 @@
+{
+"明新科大學務處組織組別": {
+    "關鍵字": ["學務處有哪些組", "學務單位", "生活輔導", "課外活動", "衛生保健", "住宿服務"],
+    "學務單位介紹": [
+        "學務處主要單位包括：處本部成員 ",
+        "生活輔導組 ",
+        "課外活動指導組 ",
+        "衛生保健組 ",
+        "住宿服務組 ",
+        "諮商輔導暨職涯發展中心 ",
+        "體育室 ",
+        "校安中心 ",
+        "進修學務組 "
+    ],
+"明新科大學務處相關連結": {
+    "關鍵字": ["學務處連結", "學務處網站", "性平專區", "學生申訴"],
+    "URL_LINKS": [
+        {"標題": "學務處最新消息", "網址": "https://admin.must.edu.tw/index.aspx?UnitID=86"},
+        {"標題": "成員介紹與分機", "網址": "https://admin.must.edu.tw/member/list.aspx?UnitID=86"},
+        {"標題": "理念與目標", "網址": "https://admin.must.edu.tw/view/content.aspx?UnitID=86&id=4893&tp=menu"},
+        {"標題": "學生申訴管道", "網址": "https://admin.must.edu.tw/index.aspx?UnitID=86"},
+        {"標題": "性別平等專區", "網址": "https://admin.must.edu.tw/index.aspx?UnitID=86"}
+    ]
+}
+}
+}

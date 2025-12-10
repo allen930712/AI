@@ -1,0 +1,14 @@
+# 核心 Web 框架與 Line Bot SDK
+Flask
+line-bot-sdk
+
+# 處理環境變數
+python-dotenv
+
+# 處理 Groq API 的 HTTP 請求 (必需)
+requests
+
+# 生產環境運行伺服器 (建議)
+gunicorn
+
+groq
