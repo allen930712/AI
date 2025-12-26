@@ -4,7 +4,7 @@ from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import (
     MessageEvent, TextMessage, TextSendMessage, ImageSendMessage,
-    TemplateSendMessage, ButtonsTemplate, URITemplateAction # <-- 新增 Template 相關
+    TemplateSendMessage, ButtonsTemplate, URITemplateAction 
 )
 from dotenv import load_dotenv
 from groq import Groq
@@ -18,11 +18,39 @@ handler = WebhookHandler(os.getenv('CHANNEL_SECRET'))
 GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct" 
 
+# ========= 1. [優化第5點] 知識庫全域快取與預載入 =========
+GLOBAL_KB = {}
+
+def preload_knowledge_base():
+    """啟動時加載所有 JSON，避免每次請求都進行硬碟 I/O"""
+    global GLOBAL_KB
+    kb = {}
+    data_path = "data"
+    if not os.path.exists(data_path):
+        print(f"⚠️ 找不到資料夾: {data_path}")
+        return
+    
+    for root, dirs, files in os.walk(data_path):
+        for file in files:
+            if file.endswith(".json"):
+                file_path = os.path.join(root, file)
+                try:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        kb.update(data)
+                except Exception as e:
+                    print(f"⚠️ 讀取 {file_path} 失敗：{e}")
+    GLOBAL_KB = kb
+    print(f"✅ 知識庫載入完成，共 {len(GLOBAL_KB)} 個主題")
+
+# 立即執行預載入
+preload_knowledge_base()
+
 # ========= Groq 客戶端初始化 =========
 try:
     groq_client = Groq(api_key=GROQ_API_KEY)
 except Exception as e:
-    print(f"⚠️ Groq 客戶端初始化失敗：{e}")
+    print(f" Groq 客戶端初始化失敗：{e}")
     groq_client = None
 
 
@@ -35,154 +63,108 @@ def _join(val):
         return "\n".join(map(str, val))
     return str(val)
 
-def load_all_json():
-    kb = {}
-    data_path = "data"
-    
-    for root, dirs, files in os.walk(data_path):
-        for file in files:
-            if file.endswith(".json"):
-                file_path = os.path.join(root, file)
-                
-                try:
-                    with open(file_path, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                        kb.update(data)
-                except Exception as e:
-                    print(f"⚠️ 讀取 {file_path} 失敗：{e}")
-    return kb
-
-# ========= RAG 檢索：提取本地上下文 (保持不變) =========
-def retrieve_local_chunks(user_text: str) -> str:
-    kb = load_all_json()
+# ========= 2. [優化第5點] 高效 RAG 檢索邏輯 =========
+def retrieve_local_content(user_text: str):
+    """
+    整合檢索：同時返回文字上下文、圖片與連結。
+    優化：使用預載入的 GLOBAL_KB，並優化關鍵字匹配算法。
+    """
     norm_text = _norm(user_text)
-    
     related_chunks = []
+    image_urls = None
+    url_links = None
 
-    for topic, info in kb.items():
+    for topic, info in GLOBAL_KB.items():
         kws = info.get("關鍵字", [])
         
-        is_topic_matched = (_norm(topic) in norm_text)
-        is_keyword_matched = False
-        
+        # 標題或關鍵字匹配
+        topic_match = (_norm(topic) in norm_text)
+        kw_match = False
         if isinstance(kws, list):
-            if any(_norm(kw) in norm_text for kw in kws):
-                is_keyword_matched = True
-        elif isinstance(kws, dict):
-            for arr in kws.values():
-                if any(_norm(kw) in norm_text for kw in arr):
-                    is_keyword_matched = True
-                    break
+            kw_match = any(_norm(kw) in norm_text for kw in kws)
         
-        if is_topic_matched or is_keyword_matched:
+        if topic_match or kw_match:
+            # 提取文字內容 (排除非文字欄位)
             for key, val in info.items():
-                # 關鍵：這裡排除 URL_LINKS，讓 AI 專注於文字，連結由 Line Template 處理
                 if key not in ["關鍵字", "圖片", "URL_LINKS"]: 
                     related_chunks.append(f"[{key}]：{_join(val)}")
+            
+            # 提取圖片 (若存在)
+            if not image_urls:
+                image_urls = info.get("圖片")
+            
+            # 提取連結 (若存在)
+            if not url_links:
+                url_links = info.get("URL_LINKS")
 
+    context_str = ""
     if related_chunks:
-        return "\n--- 知識庫參考資訊 ---\n" + "\n".join(related_chunks) + "\n-------------------------\n"
-    return ""
+        context_str = "\n--- 知識庫參考資訊 ---\n" + "\n".join(related_chunks) + "\n-------------------------\n"
+    
+    return context_str, image_urls, url_links
 
-# (圖片檢索函式保持不變)
-# ========= 圖片檢索：提取圖片 URL 列表 =========
-def retrieve_image_urls(user_text: str) -> list[str] | None:
-    kb = load_all_json()
-    norm_text = _norm(user_text)
-
-    for topic, info in kb.items():
-        kws = info.get("關鍵字", [])
-
-        is_topic_matched = (_norm(topic) in norm_text)
-        is_keyword_matched = False
-        
-        if isinstance(kws, list):
-            if any(_norm(kw) in norm_text for kw in kws):
-                is_keyword_matched = True
-        elif isinstance(kws, dict):
-            for arr in kws.values():
-                if any(_norm(kw) in norm_text for kw in arr):
-                    is_keyword_matched = True
-                    break
-        
-        if is_topic_matched or is_keyword_matched:
-            image_urls = info.get("圖片")
-            if image_urls and isinstance(image_urls, list):
-                return image_urls
-
-    return None
-
-# ========= 新增：連結檢索：提取 Template URL 列表 =========
-def retrieve_url_links(user_text: str) -> list[dict] | None:
-    kb = load_all_json()
-    norm_text = _norm(user_text)
-
-    for topic, info in kb.items():
-        kws = info.get("關鍵字", [])
-        
-        is_topic_matched = (_norm(topic) in norm_text) or any(_norm(kw) in norm_text for kw in kws)
-        
-        if is_topic_matched:
-            url_links = info.get("URL_LINKS")
-            if url_links and isinstance(url_links, list):
-                return url_links
-
-    return None
-
-
-# ========= Groq RAG 核心處理邏輯 (使用 Groq SDK) =========
+# ========= 3. [優化第3點] 上下文與 Token 管理器 =========
 memory = {}
+MAX_HISTORY_CHAR = 2000 # 粗略限制對話歷史長度（防止 Token 溢出）
 
-def GPT_response(user_id, user_text):
-    if groq_client is None:
-        return "抱歉，AI 服務器初始化失敗，請檢查 API 密鑰。"
-
-    local_context = retrieve_local_chunks(user_text)
-
+def manage_history(user_id, new_message):
+    """管理使用者的對話歷史，實施滑動窗口截斷"""
     if user_id not in memory:
         memory[user_id] = []
     
+    memory[user_id].append(new_message)
+    
+    # 計算當前總長度（粗略以字數計算）
+    total_len = sum(len(m['content']) for m in memory[user_id])
+    
+    # 如果過長，刪除最舊的對話（保留最新的訊息）
+    while total_len > MAX_HISTORY_CHAR and len(memory[user_id]) > 2:
+        removed = memory[user_id].pop(0)
+        total_len -= len(removed['content'])
+
+def GPT_response(user_id, user_text, local_context):
+    if groq_client is None:
+        return "抱歉，AI 服務器初始化失敗。"
+
     system_prompt = (
-        "你是一個親切且專業的 AI 助理，請用繁體中文回覆。 "
-        "你的主要任務是根據提供的「知識庫參考資訊」來回答使用者問題。 "
-        "請嚴格且優先使用參考資訊中的內容來組織回覆，不要臆測。 "
-        "如果參考資訊中找不到答案或該資訊不夠完整，請禮貌地告知使用者資料庫中沒有相關細節。 "
-        "請保持回覆流暢自然，並務必使用更為口語化、親切的語氣重新組織和潤飾答案。"
+        "你是一個親切且專業的明新科大 AI 助理，請用繁體中文回覆。\n"
+        "你的任務是根據「知識庫參考資訊」回答問題。若資訊不足，請基於一般常識回覆並引導使用者詢問學校相關部門。\n"
+        "請務必口語化、親切，像是一個學長姐在回答問題。"
     )
     
     full_system_content = system_prompt + local_context
 
-    current_user_message = {"role": "user", "content": user_text}
-    # 限制歷史為 -5 筆，幫助控制 Token 數
-    history_messages = memory[user_id][-5:]
+    # 獲取最近的對話歷史 (限制最多 8 筆以節省 Token)
+    history_messages = memory.get(user_id, [])[-8:]
     
     context = (
         [{"role": "system", "content": full_system_content}] +
         history_messages +
-        [current_user_message]
+        [{"role": "user", "content": user_text}]
     )
 
     try:
         completion = groq_client.chat.completions.create(
             model=GROQ_MODEL,
             messages=context,
-            temperature=0.4, # 調整為 0.4 提高穩定性
+            temperature=0.4,
             max_tokens=800
         )
         
         reply = completion.choices[0].message.content.strip()
-            
-        memory[user_id].append(current_user_message)
-        memory[user_id].append({"role": "assistant", "content": reply})
+        
+        # 存入記憶 (包含使用者輸入與助理回覆)
+        manage_history(user_id, {"role": "user", "content": user_text})
+        manage_history(user_id, {"role": "assistant", "content": reply})
         
         return reply
         
     except Exception as e:
-        print(f"Groq API 錯誤 (SDK): {e}\nTraceback: {traceback.format_exc()}")
-        return "抱歉，AI 服務器處理請求時發生錯誤，請檢查 API 密鑰和模型名稱。"
+        print(f"Groq 錯誤: {e}")
+        return "抱歉，我現在腦袋有點打結，請稍後再問我一次！"
 
 
-# ========= LINE Webhook (包含圖片/連結回覆邏輯) =========
+# ========= LINE Webhook =========
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
@@ -198,55 +180,46 @@ def handle_message(event):
     user_id = event.source.user_id
     user_text = event.message.text.strip()
     
-    # 1. 檢索所有內容
-    image_urls = retrieve_image_urls(user_text)
-    url_links = retrieve_url_links(user_text) # <-- 新增
+    # 1. 檢索優化：一次性提取所有相關資料
+    local_context, image_urls, url_links = retrieve_local_content(user_text)
     
-    reply_message = "發生錯誤，請稍後再試。" 
-    
-    # 嘗試獲取文字回覆
-    try:
-        reply_message = GPT_response(user_id, user_text)
-    except Exception:
-        print(f"GPT_response 失敗: {traceback.format_exc()}")
+    # 2. 獲取 AI 回覆
+    reply_message = GPT_response(user_id, user_text, local_context)
 
-    # 嘗試發送所有訊息
+    # 3. 構建 LINE 訊息
     try:
-        # 3. 構建訊息列表，第一個是文字回覆
         messages = [TextSendMessage(text=reply_message)]
         
-        # 4. 加入圖片回覆
+        # 圖片處理
         if image_urls:
-            for url in image_urls:
+            for url in image_urls[:2]: # 限制最多發送 2 張圖片以免洗版
                  messages.append(ImageSendMessage(original_content_url=url, preview_image_url=url))
         
-        # 5. 加入 Template 連結回覆 (解決連結失效問題)
+        # 連結處理 (Template)
         if url_links:
             actions = [
-                URITemplateAction(label=link['標題'], uri=link['網址'])
-                for link in url_links
+                URITemplateAction(label=link['標題'][:20], uri=link['網址']) # Label 限制 20 字
+                for link in url_links[:4] # 最多 4 個按鈕
             ]
-            
-            # Line Template 按鈕數量限制為 4 個
             messages.append(
                 TemplateSendMessage(
-                    alt_text='相關連結資訊',
+                    alt_text='點擊查看相關連結',
                     template=ButtonsTemplate(
                         title='相關介紹與下載',
-                        text='點擊下方按鈕以查看相關檔案或詳細介紹。',
-                        actions=actions[:4] 
+                        text='點擊下方按鈕以查看詳細資訊：',
+                        actions=actions
                     )
                 )
             )
         
-        # 6. 回覆所有訊息
         line_bot_api.reply_message(event.reply_token, messages)
         
     except Exception as e:
-        print(f"LINE API 回覆失敗: {e}\nTraceback: {traceback.format_exc()}")
-        final_text = f"🚨 系統連線成功，但部分訊息無法傳送。這是文字回覆：\n{reply_message}"
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=final_text))
+        print(f"LINE 回覆失敗: {e}")
+        # 備援計畫：僅傳送文字
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_message))
 
 
 if __name__ == "__main__":
-    app.run(port=5000)
+    # 建議生產環境改用 Gunicorn
+    app.run(host='0.0.0.0', port=5000)
