@@ -1,61 +1,45 @@
-import json
+import random
 from locust import HttpUser, task, between
 
-class LineBotPressureTest(HttpUser):
-    # 模擬使用者發送訊息後的思考時間（1~3秒）
+class AdvancedPressTest(HttpUser):
+    # 模擬每位使用者停頓 1 到 3 秒，更接近真人行為
     wait_time = between(1, 3)
 
-    @task
-    def send_webhook_message(self):
-        """
-        模擬 LINE Messaging API 發送的 Webhook POST 請求
-        """
-        # 模擬測試訊息：包含一個關鍵字以觸發 RAG 檢索
+    @task(5)  # 權重最高：核心功能測試
+    def test_department_query(self):
+        """情境 1：精準系所查詢 (測試 RAG 檢索效率)"""
+        questions = [
+            "電機系老師有哪些？",
+            "電子系的課程安排",
+            "半導體學院在哪裡？",
+            "資工系的系主任是誰？"
+        ]
+        self._post_test(random.choice(questions))
+
+    @task(3)
+    def test_general_query(self):
+        """情境 2：一般校園諮詢 (測試 AI 彙整能力)"""
+        questions = [
+            "明新科大的交通方式？",
+            "學校附近有什麼好吃的？",
+            "圖書館幾點開門？"
+        ]
+        self._post_test(random.choice(questions))
+
+    @task(2)
+    def test_oos_query(self):
+        """情境 3：邊界測試 (測試系統在無資料時的反應)"""
+        questions = [
+            "今天天氣好嗎？",
+            "你會寫程式嗎？",
+            "明新科大有超能力學院嗎？"
+        ]
+        self._post_test(random.choice(questions))
+
+    def _post_test(self, text):
         payload = {
-            "destination": "xxxxxxxxxx",
-            "events": [
-                {
-                    "type": "message",
-                    "message": {
-                        "type": "text",
-                        "id": "123456789",
-                        "text": "電子系介紹"  # 這裡可以更改為不同的關鍵字進行測試
-                    },
-                    "timestamp": 1627310000000,
-                    "source": {
-                        "type": "user",
-                        "userId": "U123456789abcdef"
-                    },
-                    "replyToken": "nH7wFpWTP9uJ9qn3"
-                }
-            ]
+            "text": text,
+            "userId": f"user_{random.randint(1, 999)}"
         }
-
-        # 設定 Header：模擬 LINE 要求的簽章（您的程式目前只驗證格式，壓測時可帶入 mock 值）
-        headers = {
-            'Content-Type': 'application/json',
-            'X-Line-Signature': 'pressure_test_mock_signature'
-        }
-
-        # 發送 POST 請求到您的 /callback 端點
-        with self.client.post("/callback", json=payload, headers=headers, catch_response=True) as response:
-            if response.status_code == 200:
-                response.success()
-            else:
-                response.failure(f"HTTP {response.status_code}: {response.text}")
-
-    @task(1)
-    def test_random_query(self):
-        """
-        模擬使用者詢問不在資料庫內的隨機問題，測試單純 AI 推理的效能
-        """
-        payload = {
-            "events": [{
-                "type": "message",
-                "message": {"type": "text", "text": "今天天氣怎麼樣？"},
-                "source": {"type": "user", "userId": "U_random_001"},
-                "replyToken": "random_token"
-            }]
-        }
-        headers = {'X-Line-Signature': 'mock'}
-        self.client.post("/callback", json=payload, headers=headers)
+        # 向我們之前建置的 /test_press 端點發送請求
+        self.client.post("/test_press", json=payload)
